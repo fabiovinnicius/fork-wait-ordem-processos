@@ -1,0 +1,210 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{balance}
+
+\lstset{
+  basicstyle=\ttfamily\scriptsize,
+  columns=flexible,
+  keepspaces=true,
+  breaklines=true,
+  breakatwhitespace=false,
+  frame=single,
+  numbers=none,
+  xleftmargin=0pt,
+  xrightmargin=0pt,
+  showstringspaces=false,
+  aboveskip=6pt,
+  belowskip=6pt
+}
+
+\begin{document}
+
+\title{Ordem de Criação versus Ordem de Término de Processos Filhos: Estudo Experimental com 
+\texttt{fork()} e \texttt{wait()}}
+
+\author{
+\IEEEauthorblockN{Fábio Vinnicius Silva Sousa, Jonatas Andrade do Nascimento}
+\IEEEauthorblockA{
+Curso de Ciência da Computação,
+Instituto Federal Campus Maracanaú
+}
+}
+
+\maketitle
+
+\begin{abstract}
+Um processo pai que cria múltiplos processos filhos por meio de chamadas
+sequenciais a \texttt{fork()} pode dar a falsa impressão de que esses filhos
+também serão executados e terminarão na mesma ordem em que foram criados.
+Este trabalho investiga experimentalmente essa hipótese. Foi implementado um
+programa em C que cria $N$ processos filhos, cada um executando uma carga de
+trabalho de duração aleatória e independente, e mede a ordem em que o
+processo pai os recebe de volta via \texttt{wait()}. Os experimentos foram
+repetidos centenas de vezes para diferentes valores de $N$ e comparados com o
+modelo teórico de uma permutação aleatória uniforme. Os resultados mostram
+que a hipótese deve ser \textbf{rejeitada}: a probabilidade de a ordem de
+término coincidir com a ordem de criação cai rapidamente conforme $N$
+aumenta, de forma consistente com $1/N!$, evidenciando que o escalonador do
+sistema operacional não garante nenhuma relação entre ordem de criação e
+ordem de término dos processos.
+\end{abstract}
+
+\begin{IEEEkeywords}
+sistemas operacionais, fork, wait, waitpid, escalonamento de processos,
+chamadas de sistema
+\end{IEEEkeywords}
+
+\section{Introdução}
+
+Em sistemas operacionais do tipo Unix, um processo pai pode criar múltiplos
+processos filhos por meio de chamadas sucessivas a \texttt{fork()}. Como os
+filhos são criados sequencialmente, um raciocínio ingênuo poderia supor que
+essa ordem se refletiria também na ordem em que os filhos terminam sua
+execução e, consequentemente, na ordem em que o processo pai os recebe de
+volta via \texttt{wait()}.
+
+\textbf{Problema.} A ordem de criação dos processos filhos garante a ordem
+em que eles serão executados e terminados?
+
+\textbf{Hipótese.} A ordem em que os processos filhos são criados influencia
+a ordem em que eles serão executados e terminados; consequentemente, ao
+utilizar \texttt{wait()}, o processo pai tenderá a receber os filhos na
+mesma ordem em que foram criados.
+
+Esta hipótese é razoável à primeira vista, pois os filhos são de fato criados
+em sequência e herdam código idêntico do pai. Entretanto, uma vez criado, cada
+processo filho passa a ser uma entidade independente, sujeita ao escalonador
+do sistema operacional e à duração do trabalho que executa, fatores que não
+têm relação necessária com a ordem de criação. Este trabalho projeta e executa
+um experimento controlado para testar essa hipótese.
+
+\section{Metodologia}
+
+\subsection{Desenho do experimento}
+
+Foi implementado um programa em C (\texttt{experiment.c}) que, para um
+parâmetro $N$ informado na linha de comando:
+
+\begin{enumerate}
+  \item cria $N$ processos filhos em laço sequencial usando \texttt{fork()},
+        armazenando o PID de cada filho na ordem em que foi criado;
+  \item cada filho executa uma carga de trabalho de duração aleatória e
+        independente, sorteada uniformemente no intervalo $[10\,ms, 210\,ms]$
+        via \texttt{usleep()}, e então encerra repassando seu índice de
+        criação como código de saída (\texttt{\_exit(i)});
+  \item o processo pai aguarda os $N$ filhos com \texttt{wait()} genérico
+        (sem especificar qual PID esperar), registrando a ordem real em que
+        os filhos terminam;
+  \item ao final, o programa compara a sequência de PIDs de término com a
+        sequência de PIDs de criação e reporta se a ordem foi preservada.
+\end{enumerate}
+
+\subsection{Cuidado metodológico: independência das amostras}
+
+Uma armadilha identificada durante a implementação merece registro. Em uma
+primeira versão, o gerador de números pseudoaleatórios era semeado
+(\texttt{srand()}) uma única vez pelo processo pai, antes do laço de
+\texttt{fork()}. Como o \texttt{fork()} duplica a memória do processo
+(\emph{copy-on-write}), todos os filhos herdavam o \emph{mesmo} estado do
+gerador e, portanto, sorteavam exatamente o mesmo tempo de trabalho, o que
+invalidava a premissa de amostras independentes e enviesava artificialmente
+o resultado a favor da hipótese (a ordem de término passava a depender
+apenas da pequena vantagem de tempo de quem foi criado primeiro). A correção
+foi semear o gerador \emph{dentro} de cada filho, após o \texttt{fork()},
+combinando \texttt{clock\_gettime(CLOCK\_REALTIME)} com o PID do próprio
+filho (Listagem~\ref{lst:seed}). Esse ponto ilustra como um detalhe de
+implementação pode comprometer silenciosamente a validade de um experimento.
+
+\begin{lstlisting}[
+  caption={Semeadura independente por filho.},
+  label={lst:seed}
+]
+if (pid == 0) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    srand((unsigned int)ts.tv_nsec ^ getpid());
+    int tempo_us = (rand() % 200000) + 10000;
+    usleep(tempo_us);
+    _exit(i);
+}
+\end{lstlisting}
+
+\subsection{Procedimento estatístico}
+
+Para cada valor de $N \in \{2,3,4,5,10\}$, o programa foi executado
+repetidamente (script \texttt{run\_experiments.sh}), e foi calculada a
+fração de execuções em que a ordem de término coincidiu exatamente com a
+ordem de criação. Esse valor observado foi comparado ao valor esperado sob
+a hipótese nula de que a ordem de término é uma permutação uniformemente
+aleatória das $N!$ permutações possíveis, isto é, probabilidade $1/N!$ de
+coincidência exata por acaso.
+
+\section{Resultados}
+
+A Tabela~\ref{tab:resultados} apresenta, para cada $N$, o número de rodadas
+executadas, a fração de rodadas em que a ordem de criação foi preservada e o
+valor teórico $1/N!$ esperado sob aleatoriedade uniforme.
+
+\begin{table}[htbp]
+\caption{Fração de execuções em que a ordem de término coincidiu com a ordem de criação}
+\label{tab:resultados}
+\centering
+\begin{tabular}{@{}ccccc@{}}
+\toprule
+$N$ & Rodadas & Ordem preservada & Observado & Esperado ($1/N!$) \\
+\midrule
+2  & 150 & 85  & 56{,}7\% & 50{,}0\% \\
+3  & 150 & 18  & 12{,}0\% & 16{,}7\% \\
+4  & 150 & 10  & 6{,}7\%  & 4{,}2\%  \\
+5  & 150 & 0   & 0{,}0\%  & 0{,}8\%  \\
+10 & 100 & 0   & 0{,}0\%  & $\approx$0{,}00003\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Os valores observados acompanham de perto a ordem de grandeza prevista pelo
+modelo de permutação aleatória, especialmente para $N$ pequeno. Para
+$N \geq 5$, a probabilidade teórica já é tão baixa que nenhuma das rodadas
+executadas preservou a ordem original, como esperado. O padrão dominante é a
+queda acentuada, praticamente fatorial, da taxa de preservação de ordem à
+medida que o número de filhos cresce.
+
+\emph{Nota:} os valores acima foram obtidos no ambiente de desenvolvimento
+usado para este rascunho. Eles devem ser \textbf{regenerados na máquina da
+equipe} antes da entrega, pois dependem do número de núcleos, da carga do
+sistema e do escalonador do SO utilizado.
+
+\section{Conclusões}
+
+Os resultados experimentais rejeitam a hipótese original: a ordem de criação
+dos processos filhos \emph{não} determina a ordem em que eles terminam nem a
+ordem em que \texttt{wait()} os retorna ao processo pai. Um \texttt{wait()}
+genérico simplesmente devolve o próximo filho que terminar, independente de
+quando foi criado, e a probabilidade de a ordem coincidir com a criação
+converge rapidamente para a de uma permutação aleatória conforme $N$ cresce.
+Na prática, isso significa que qualquer código que dependa implicitamente da
+ordem de criação dos filhos (por exemplo, para associar resultados a tarefas
+específicas) é incorreto e deve, em vez disso, usar mecanismos explícitos de
+identificação, como o valor de retorno de \texttt{fork()} armazenado pelo pai
+combinado a \texttt{waitpid()} direcionado a um PID específico, quando a
+ordem de atendimento precisar ser controlada.
+
+\balance
+\begin{thebibliography}{00}
+\bibitem{silberschatz} A. Silberschatz, P. B. Galvin, and G. Gagne,
+\emph{Operating System Concepts}, 10th ed. Hoboken, NJ, USA: Wiley, 2018.
+\bibitem{stevens} W. R. Stevens and S. A. Rago,
+\emph{Advanced Programming in the UNIX Environment}, 3rd ed. Boston, MA, USA: Addison-Wesley, 2013.
+\bibitem{fork2} Linux manual page, \emph{fork(2)}. [Online]. Available: https://man7.org/linux/man-pages/man2/fork.2.html
+\bibitem{wait2} Linux manual page, \emph{wait(2)}. [Online]. Available: https://man7.org/linux/man-pages/man2/wait.2.html
+\end{thebibliography}
+
+\end{document}
